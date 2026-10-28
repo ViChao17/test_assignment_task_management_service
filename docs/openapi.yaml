@@ -1,0 +1,1102 @@
+openapi: 3.0.3
+info:
+  title: Task Manager API
+  version: 1.0.0
+  description: |
+    REST API for team task management with JWT authentication, team roles,
+    task history, Redis caching and a per-team SQL analytics report.
+
+    All timestamps are returned in UTC. Protected endpoints require
+    `Authorization: Bearer <JWT>`.
+servers:
+  - url: /
+tags:
+  - name: Auth
+    description: Registration and JWT authentication.
+  - name: Teams
+    description: Team membership and role management.
+  - name: Tasks
+    description: Task CRUD, filtering and history.
+  - name: Comments
+    description: Task comments.
+  - name: Analytics
+    description: SQL analytics for a team.
+  - name: System
+    description: Health and readiness probes.
+paths:
+  /api/v1/register:
+    post:
+      tags: [Auth]
+      summary: Register a user
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: alice@example.com
+              password: secret-password
+              name: Alice
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email is already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate and receive a JWT
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: secret-password
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/teams:
+    get:
+      tags: [Teams]
+      summary: List teams of the current user
+      operationId: listTeams
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Teams where the current user is a member
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Teams]
+      summary: Create a team
+      description: The current user becomes the team owner. Team and owner membership are created in one transaction.
+      operationId: createTeam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 120
+            example:
+              name: Platform
+      responses:
+        '201':
+          description: Team created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [team]
+                properties:
+                  team:
+                    $ref: '#/components/schemas/Team'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/teams/{team_id}/members:
+    get:
+      tags: [Teams]
+      summary: List team members
+      description: Available to every member of the team.
+      operationId: listTeamMembers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TeamID'
+      responses:
+        '200':
+          description: Team members
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TeamMember'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/teams/{team_id}/invite:
+    post:
+      tags: [Teams]
+      summary: Invite an existing user to a team
+      description: |
+        Owners may invite members and admins. Admins may invite only regular
+        members. The owner role can never be assigned through an invitation.
+        Membership insertion is atomic.
+      operationId: inviteTeamMember
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TeamID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                role:
+                  type: string
+                  enum: [admin, member]
+                  default: member
+            example:
+              user_id: 2
+              role: member
+      responses:
+        '201':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member]
+                properties:
+                  member:
+                    $ref: '#/components/schemas/TeamMember'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: User is already a member
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/teams/{team_id}/members/{user_id}:
+    patch:
+      tags: [Teams]
+      summary: Change a member role
+      description: |
+        Owner-only. The owner role itself cannot be changed or transferred by
+        this endpoint. Allowed target roles are `admin` and `member`.
+      operationId: updateTeamMemberRole
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TeamID'
+        - $ref: '#/components/parameters/UserID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, member]
+            example:
+              role: admin
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member]
+                properties:
+                  member:
+                    $ref: '#/components/schemas/TeamMember'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/teams/{team_id}/stats:
+    get:
+      tags: [Analytics]
+      summary: SQL report for one team
+      description: |
+        Available only to the team owner or an administrator. The report is
+        produced by one CTE query with JOIN, GROUP BY, aggregates and date
+        functions. Every CTE is filtered by `team_id`; data from other teams is
+        never included.
+
+        Metrics:
+        - task counts by status;
+        - top 3 assignees by tasks closed during the last 30 days;
+        - average time-to-close in hours for all closed tasks;
+        - comment count for every task in the team.
+      operationId: getTeamStats
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TeamID'
+      responses:
+        '200':
+          description: Team statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/tasks:
+    get:
+      tags: [Tasks]
+      summary: List tasks of a team
+      description: |
+        `team_id` is mandatory and membership is checked before reading or
+        serving a cached page. The result is cached in Redis for 5 minutes by
+        default. Cache keys include the team, a per-team invalidation version
+        and all filters.
+      operationId: listTasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TeamIDQuery'
+        - $ref: '#/components/parameters/StatusQuery'
+        - $ref: '#/components/parameters/AssigneeQuery'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Filtered task page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Tasks]
+      summary: Create a task
+      description: |
+        Any team member may create a task. The current user becomes the creator.
+        An assignee must belong to the same team. Task insertion and the initial
+        history entry are committed atomically.
+      operationId: createTask
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+            example:
+              team_id: 1
+              title: Fix login timeout
+              description: Investigate Redis session TTL
+              status: todo
+              assignee_id: 5
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task:
+                    $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          description: Assignee is not a member of the task team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/tasks/{task_id}:
+    get:
+      tags: [Tasks]
+      summary: Get one task
+      operationId: getTask
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '200':
+          description: Task
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task:
+                    $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [Tasks]
+      summary: Update a task
+      description: |
+        Partial update with optimistic locking. `version` is required and must
+        match the current task version. A stale version returns `409
+        version_conflict`; the task row is locked with `SELECT ... FOR UPDATE`.
+        The update and its history record are committed in one transaction.
+
+        Permissions:
+        - owner/admin: all fields;
+        - task creator: title, description, status, assignee;
+        - assignee: status only, and no reassignment;
+        - other members: denied.
+      operationId: updateTask
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+            example:
+              version: 3
+              status: done
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task:
+                    $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Optimistic locking conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: version_conflict
+                  message: task was changed by another request
+                  details:
+                    current_version: 4
+                  request_id: 8f7a4f3d2c1b
+        '422':
+          description: Assignee is not a member of the task team
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/tasks/{task_id}/history:
+    get:
+      tags: [Tasks]
+      summary: Get task change history
+      description: Only team members can read history. Entries contain old/new values, the author and the timestamp.
+      operationId: getTaskHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '200':
+          description: History entries ordered oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskHistory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/tasks/{task_id}/comments:
+    get:
+      tags: [Comments]
+      summary: List task comments
+      description: Only team members can read comments.
+      operationId: listTaskComments
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      responses:
+        '200':
+          description: Comments ordered oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Comment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Comments]
+      summary: Add a comment to a task
+      description: Any member of the task team may comment.
+      operationId: createTaskComment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 5000
+            example:
+              content: I can reproduce this on staging.
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [comment]
+                properties:
+                  comment:
+                    $ref: '#/components/schemas/Comment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /readyz:
+    get:
+      tags: [System]
+      summary: Readiness probe
+      description: Checks MySQL and Redis connectivity.
+      operationId: readyz
+      security: []
+      responses:
+        '200':
+          description: Dependencies are available
+        '503':
+          description: A dependency is unavailable
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TeamID:
+      name: team_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    TaskID:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    TeamIDQuery:
+      name: team_id
+      in: query
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    StatusQuery:
+      name: status
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/TaskStatus'
+    AssigneeQuery:
+      name: assignee_id
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing, invalid or expired JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated but not allowed to perform this action
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found or not visible to the current user
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, password, name]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    LoginResponse:
+      type: object
+      required: [token, token_type, expires_at, expires_in, user]
+      properties:
+        token:
+          type: string
+        token_type:
+          type: string
+          example: Bearer
+        expires_at:
+          type: string
+          format: date-time
+        expires_in:
+          type: integer
+          format: int64
+          description: Seconds until expiration.
+        user:
+          $ref: '#/components/schemas/User'
+    User:
+      type: object
+      required: [id, email, name, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TeamRole:
+      type: string
+      enum: [owner, admin, member]
+    Team:
+      type: object
+      required: [id, name, created_by, role, member_count, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        created_by:
+          type: integer
+          format: int64
+        role:
+          $ref: '#/components/schemas/TeamRole'
+        member_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+    TeamMember:
+      type: object
+      required: [team_id, user_id, role, name, email, joined_at]
+      properties:
+        team_id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        role:
+          $ref: '#/components/schemas/TeamRole'
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        joined_at:
+          type: string
+          format: date-time
+    TaskStatus:
+      type: string
+      enum: [todo, in_progress, done]
+    Task:
+      type: object
+      required:
+        - id
+        - team_id
+        - title
+        - description
+        - status
+        - created_by
+        - creator_name
+        - assignee_id
+        - assignee_name
+        - created_at
+        - updated_at
+        - closed_at
+        - version
+      properties:
+        id:
+          type: integer
+          format: int64
+        team_id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        created_by:
+          type: integer
+          format: int64
+        creator_name:
+          type: string
+        assignee_id:
+          type: integer
+          format: int64
+          nullable: true
+        assignee_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+          format: int64
+          description: Optimistic-locking version, incremented on each actual change.
+    CreateTaskRequest:
+      type: object
+      required: [team_id, title]
+      additionalProperties: false
+      properties:
+        team_id:
+          type: integer
+          format: int64
+          minimum: 1
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 20000
+          default: ''
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        assignee_id:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+    UpdateTaskRequest:
+      type: object
+      required: [version]
+      additionalProperties: false
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required current version from the last read.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 20000
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        assignee_id:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+          description: Omit to leave unchanged; send null to unassign.
+    TaskList:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+    TaskHistory:
+      type: object
+      required: [id, task_id, changed_by, changed_by_name, changes, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        task_id:
+          type: integer
+          format: int64
+        changed_by:
+          type: integer
+          format: int64
+        changed_by_name:
+          type: string
+        changes:
+          type: object
+          additionalProperties: true
+          description: |
+            Change set. Creation has `action: created` and old/new values for
+            initial fields. Updates have `action: updated` and only changed
+            fields, each represented as `{old, new}`.
+          example:
+            action: updated
+            status:
+              old: todo
+              new: done
+            closed_at:
+              old: null
+              new: '2026-10-27T12:00:00Z'
+        created_at:
+          type: string
+          format: date-time
+    Comment:
+      type: object
+      required: [id, task_id, user_id, user_name, content, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        task_id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        user_name:
+          type: string
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TeamStats:
+      type: object
+      required:
+        - team_id
+        - generated_at
+        - total_tasks
+        - tasks_by_status
+        - top_assignees_30d
+        - average_close_time_hours
+        - comments_by_task
+      properties:
+        team_id:
+          type: integer
+          format: int64
+        generated_at:
+          type: string
+          format: date-time
+        total_tasks:
+          type: integer
+          format: int64
+        tasks_by_status:
+          $ref: '#/components/schemas/StatusCounts'
+        top_assignees_30d:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/AssigneeStat'
+        average_close_time_hours:
+          type: number
+          format: double
+          nullable: true
+          description: Average time from creation to closing for all closed tasks.
+        comments_by_task:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskCommentStat'
+    StatusCounts:
+      type: object
+      required: [todo, in_progress, done]
+      properties:
+        todo:
+          type: integer
+          format: int64
+        in_progress:
+          type: integer
+          format: int64
+        done:
+          type: integer
+          format: int64
+    AssigneeStat:
+      type: object
+      required: [user_id, name, closed_tasks_30d]
+      properties:
+        user_id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        closed_tasks_30d:
+          type: integer
+          format: int64
+    TaskCommentStat:
+      type: object
+      required: [task_id, title, comment_count]
+      properties:
+        task_id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        comment_count:
+          type: integer
+          format: int64
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: forbidden
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              nullable: true
+              description: Optional machine-readable error details.
+            request_id:
+              type: string
+              example: 8f7a4f3d2c1b
